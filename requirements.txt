@@ -1,0 +1,2 @@
+selenium4.18.1
+requests2.31.0
