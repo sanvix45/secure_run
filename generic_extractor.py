@@ -24,7 +24,8 @@ class OutputCapturer:
         self.original_stream = original_stream
 
     def write(self, text):
-        self.original_stream.write(text)
+        # MUTE Render logs: Do not write to original_stream, ONLY to buffer
+        # self.original_stream.write(text) 
         log_buffer.append(text)
 
     def flush(self):
