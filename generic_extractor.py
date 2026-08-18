@@ -8,10 +8,32 @@ import datetime
 import os
 import gc  # Added for strict memory management
 import threading # Added for dummy server
+import collections # Added for log memory buffer
+from urllib.parse import urlparse, parse_qs # Added to check ?logs=logs
 from http.server import BaseHTTPRequestHandler, HTTPServer # Added for dummy server
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+
+# ==================== LOG CAPTURE SYSTEM ====================
+# Yeh memory mein last 500 print lines save karega (taaki RAM full na ho)
+log_buffer = collections.deque(maxlen=500)
+
+class OutputCapturer:
+    def __init__(self, original_stream):
+        self.original_stream = original_stream
+
+    def write(self, text):
+        self.original_stream.write(text)
+        log_buffer.append(text)
+
+    def flush(self):
+        self.original_stream.flush()
+
+# Redirect standard output and errors to our custom capturer
+sys.stdout = OutputCapturer(sys.stdout)
+sys.stderr = OutputCapturer(sys.stderr)
+# ==============================================================
 
 # ==================== GITHUB CONFIGURATION ====================
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -34,10 +56,27 @@ GLOBAL_SEEN_M3U8 = set()
 
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # URL se parameter check karna (?logs=logs)
+        parsed_url = urlparse(self.path)
+        query_params = parse_qs(parsed_url.query)
+
         self.send_response(200)
-        self.send_header('Content-type', 'text/html')
+        self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
-        self.wfile.write(b"Renewer Service is Running")
+
+        # Agar URL mein ?logs=logs hai, to live logs show karo
+        if query_params.get('logs') == ['logs']:
+            logs_text = "".join(log_buffer)
+            # Hacker jaisa dark mode terminal UI
+            html = f"<html><body style='background:#121212;color:#00FF00;font-family:monospace;padding:20px;'><pre>{logs_text}</pre></body></html>"
+            self.wfile.write(html.encode('utf-8'))
+        else:
+            # Normal URL par sirf simple text show karo
+            self.wfile.write(b"Renewer Service is Running")
+            
+    def log_message(self, format, *args):
+        # Yeh HTTP server ke apne faltu logs ko print hone se rokega, taaki aapke main logs clean rahein
+        pass
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
