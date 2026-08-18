@@ -7,6 +7,8 @@ import base64
 import datetime
 import os
 import gc  # Added for strict memory management
+import threading # Added for dummy server
+from http.server import BaseHTTPRequestHandler, HTTPServer # Added for dummy server
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -29,6 +31,19 @@ HEADERS = {
 # ==============================================================
 
 GLOBAL_SEEN_M3U8 = set()
+
+class DummyHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-type', 'text/html')
+        self.end_headers()
+        self.wfile.write(b"Renewer Service is Running")
+
+def run_dummy_server():
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), DummyHandler)
+    print(f"[*] Started dummy web server on port {port} to satisfy Render.")
+    server.serve_forever()
 
 def read_current_data_from_github():
     """Reads the existing source.json from GitHub."""
@@ -175,6 +190,10 @@ def main():
     print("=" * 70)
     print("  Smart M3U8 Renewer - Priority Expiry Checker (Render Optimized)")
     print("=" * 70)
+
+    # Start the dummy web server in a background thread so Render marks deployment as successful
+    server_thread = threading.Thread(target=run_dummy_server, daemon=True)
+    server_thread.start()
 
     wait_sec = 10
     
