@@ -77,12 +77,16 @@ def create_driver():
     """Initializes Chrome webdriver with extreme low-memory configuration for Render."""
     options = Options()
     
+    # Eager load strategy skips waiting for heavy CSS/Assets to load
+    options.page_load_strategy = 'eager'
+    
     # --- RENDER / SERVER HEADLESS OPTIONS ---
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage") # CRITICAL for 500MB limits
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
+    options.add_argument("--mute-audio") # Save processing power
     
     # --- EXTREME MEMORY SAVING FLAGS ---
     options.add_argument("--disable-extensions")
@@ -176,7 +180,6 @@ def main():
     
     while True:
         gc.collect() # Clean up memory at the start of loop
-        driver = None # Driver is initialized only when needed
         
         print("\n" + "=" * 50)
         print(f"Checking for expiring links at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -224,95 +227,91 @@ def main():
 
         print(f"[!] Found {len(urgent_queue)} videos that are expired or expiring within 1 hour!")
         
-        # Start browser ONLY when there is work to do
-        driver = create_driver()
-        
-        try:
-            # 3. Process ALL urgent items to renew them completely
-            GLOBAL_SEEN_M3U8.clear()
-            updates_made_in_batch = 0
-            total_renewed = 0
+        # 3. Process ALL urgent items to renew them completely
+        GLOBAL_SEEN_M3U8.clear()
+        updates_made_in_batch = 0
+        total_renewed = 0
 
-            for priority_num, urgent_item in enumerate(urgent_queue, 1):
-                idx = urgent_item["array_index"]
-                video = urgent_item["item_data"]
-                expiry = urgent_item["expiry"]
-                vurl = video.get("source_page")
+        for priority_num, urgent_item in enumerate(urgent_queue, 1):
+            idx = urgent_item["array_index"]
+            video = urgent_item["item_data"]
+            expiry = urgent_item["expiry"]
+            vurl = video.get("source_page")
+            
+            if not vurl:
+                continue
+
+            time_left_mins = (expiry - current_time) // 60
+            if expiry == 0:
+                time_status = "NO VALID LINK"
+            elif time_left_mins < 0:
+                time_status = f"EXPIRED {abs(time_left_mins)} mins ago"
+            else:
+                time_status = f"Expires in {time_left_mins} mins"
+
+            print(f"\n[{priority_num}/{len(urgent_queue)}] Urgent: {time_status}")
+            print(f"Opening: {vurl}")
+            
+            driver = None
+            try:
+                # --- EXTREME RAM PROTECTION ---
+                # Open browser brand new for EVERY single video
+                driver = create_driver()
                 
-                if not vurl:
-                    continue
-
-                time_left_mins = (expiry - current_time) // 60
-                if expiry == 0:
-                    time_status = "NO VALID LINK"
-                elif time_left_mins < 0:
-                    time_status = f"EXPIRED {abs(time_left_mins)} mins ago"
+                driver.get(vurl)
+                time.sleep(2)
+                clear_js(driver)
+                inject(driver)
+                
+                end_t = time.time() + wait_sec
+                round_found = []
+                while time.time() < end_t:
+                    for u in get_all_m3u8(driver):
+                        if u not in GLOBAL_SEEN_M3U8:
+                            GLOBAL_SEEN_M3U8.add(u)
+                            round_found.append(u)
+                    time.sleep(1)
+                
+                if round_found:
+                    print(f"    [+] RENEWED! Got {len(round_found)} fresh m3u8 URL(s).")
+                    # Replace the old m3u8 array with the newly fetched ones
+                    all_videos[idx]["m3u8_links"] = round_found
+                    updates_made_in_batch += 1
+                    total_renewed += 1
                 else:
-                    time_status = f"Expires in {time_left_mins} mins"
+                    print("    [-] Failed to renew link (no stream captured).")
 
-                print(f"\n[{priority_num}/{len(urgent_queue)}] Urgent: {time_status}")
-                print(f"Opening: {vurl}")
+            except Exception as e:
+                print(f"    [-] Error processing page: {e}")
                 
-                try:
-                    driver.get(vurl)
-                    time.sleep(2)
-                    clear_js(driver)
-                    inject(driver)
-                    
-                    end_t = time.time() + wait_sec
-                    round_found = []
-                    while time.time() < end_t:
-                        for u in get_all_m3u8(driver):
-                            if u not in GLOBAL_SEEN_M3U8:
-                                GLOBAL_SEEN_M3U8.add(u)
-                                round_found.append(u)
-                        time.sleep(1)
-                    
-                    if round_found:
-                        print(f"    [+] RENEWED! Got {len(round_found)} fresh m3u8 URL(s).")
-                        # Replace the old m3u8 array with the newly fetched ones
-                        all_videos[idx]["m3u8_links"] = round_found
-                        updates_made_in_batch += 1
-                        total_renewed += 1
-                    else:
-                        print("    [-] Failed to renew link (no stream captured).")
-
-                except Exception as e:
-                    print(f"    [-] Error processing page: {e}")
-
-                # Strict RAM control per video
+            finally:
+                # --- CRITICAL MEMORY STEP ---
+                # Kill Chrome completely after EVERY single video
+                if driver:
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                
+                # Strict RAM wipe
                 gc.collect()
 
-                # Upload to GitHub every 50 successful renewals to save progress safely
-                if updates_made_in_batch >= 50:
-                    print(f"\n[+] Batch of 50 renewed. Uploading progress to GitHub...")
-                    existing_data["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    existing_data["data"] = all_videos
-                    update_links_in_github(existing_data)
-                    updates_made_in_batch = 0
-
-            # 4. Upload any remaining updated data to GitHub
-            if updates_made_in_batch > 0:
-                print(f"\n[+] Finalizing upload... Saving remaining {updates_made_in_batch} renewals to GitHub.")
+            # Upload to GitHub every 20 successful renewals to save progress safely
+            if updates_made_in_batch >= 20:
+                print(f"\n[+] Batch of 20 renewed. Uploading progress to GitHub...")
                 existing_data["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 existing_data["data"] = all_videos
                 update_links_in_github(existing_data)
-            elif total_renewed == 0:
-                print("\n[-] No successful renewals in this cycle.")
+                updates_made_in_batch = 0
 
-        except Exception as e:
-            print(f"\n[-] A critical error occurred during renewal cycle: {e}")
-            
-        finally:
-            # --- CRITICAL MEMORY STEP ---
-            # Kill Chrome completely before sleeping for 20 mins to free up all RAM!
-            if driver:
-                try:
-                    driver.quit()
-                    print("[*] Chrome browser closed successfully to free RAM.")
-                except:
-                    pass
-            gc.collect()
+        # 4. Upload any remaining updated data to GitHub
+        if updates_made_in_batch > 0:
+            print(f"\n[+] Finalizing upload... Saving remaining {updates_made_in_batch} renewals to GitHub.")
+            existing_data["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            existing_data["data"] = all_videos
+            update_links_in_github(existing_data)
+        elif total_renewed == 0:
+            print("\n[-] No successful renewals in this cycle.")
 
         # 5. Rest for 20 minutes after completing the full renewal cycle
         print(f"\n[!] Renewal cycle complete. Total URLs renewed: {total_renewed}")
