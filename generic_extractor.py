@@ -262,7 +262,11 @@ def main():
         expiring_soon_queue = [] # Stage 2: Valid now, but expiring in 0-30 minutes
 
         for idx, item in enumerate(all_videos):
-            m3u8_links = item.get("m3u8_links", [])
+            # CLEANUP: Remove ads domains from existing data before checking
+            raw_m3u8_links = item.get("m3u8_links", [])
+            m3u8_links = [link for link in raw_m3u8_links if "svacdn.tsyndicate.com" not in link]
+            item["m3u8_links"] = m3u8_links # Update item to permanently remove ads
+            
             earliest_expiry = float('inf')
             
             if not m3u8_links:
@@ -346,6 +350,8 @@ def main():
                 round_found = []
                 while time.time() < end_t:
                     for u in get_all_m3u8(driver):
+                        if "svacdn.tsyndicate.com" in u:
+                            continue # Ignore fast-expiring ad links
                         if u not in GLOBAL_SEEN_M3U8:
                             GLOBAL_SEEN_M3U8.add(u)
                             round_found.append(u)
