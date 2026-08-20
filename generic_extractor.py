@@ -355,19 +355,20 @@ def main():
                 # Strict RAM wipe
                 gc.collect()
 
-            # Upload to GitHub every 20 successful renewals to save progress safely
-            if updates_made_in_batch >= 20:
-                print(f"\n[+] Batch of 20 renewed. Uploading progress to GitHub...")
-                existing_data["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                existing_data["data"] = all_videos
-                update_links_in_github(existing_data)
-                updates_made_in_batch = 0
-            
-            # --- NEW ADDITION: 1 MINUTE REST AFTER EVERY 10 LINKS ---
-            # Har 10 links process hone ke baad 1 minute ka aaram karega
-            if priority_num % 10 == 0 and priority_num < len(urgent_queue):
-                print("\n[ZzZ] 10 links process ho gaye hain. 1 minute (60 seconds) ka rest le rahe hain...")
-                time.sleep(60)
+            # --- 10 LINKS CHECKPOINT: Upload to GitHub & 1 Minute Rest ---
+            if priority_num % 10 == 0:
+                if updates_made_in_batch > 0:
+                    print(f"\n[+] 10 links process ho gaye hain! GitHub (.json) par update kar rahe hain ({updates_made_in_batch} fresh renewals)...")
+                    existing_data["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    existing_data["data"] = all_videos
+                    update_links_in_github(existing_data)
+                    updates_made_in_batch = 0
+                else:
+                    print("\n[!] 10 links process ho gaye hain (koi new renewals nahi hue).")
+
+                if priority_num < len(urgent_queue):
+                    print("[ZzZ] 1 minute (60 seconds) ka rest le rahe hain...")
+                    time.sleep(60)
 
         # 4. Upload any remaining updated data to GitHub
         if updates_made_in_batch > 0:
