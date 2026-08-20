@@ -251,7 +251,7 @@ def main():
 
         all_videos = existing_data["data"]
         current_time = int(time.time())
-        one_hour_limit = current_time + 3600 # 1 hour from now
+        thirty_min_limit = current_time + 1800 # 30 minutes from now (Changed from 1 hour)
         
         # 1. Identify videos that need renewal
         urgent_queue = []
@@ -267,24 +267,24 @@ def main():
                     if exp < earliest_expiry:
                         earliest_expiry = exp
             
-            # If the earliest expiry is within 1 hour, or it's 0 (invalid/missing)
-            if earliest_expiry <= one_hour_limit:
+            # If the earliest expiry is within 30 minutes, or it's 0 (invalid/missing)
+            if earliest_expiry <= thirty_min_limit:
                 urgent_queue.append({
                     "array_index": idx,
                     "expiry": earliest_expiry,
                     "item_data": item
                 })
 
-        # 2. Sort the queue so the lowest expiry (most urgent) is processed FIRST
+        # 2. Sort the queue so the lowest expiry (most urgent/expired) is processed FIRST
         urgent_queue.sort(key=lambda x: x["expiry"])
 
         if not urgent_queue:
-            print("[+] All links are healthy and have > 1 hour of lifetime left.")
+            print("[+] All links are healthy and have > 30 mins of lifetime left.")
             print("[ZzZ] Sleeping for 20 minutes before checking again...")
             time.sleep(1200)
             continue
 
-        print(f"[!] Found {len(urgent_queue)} videos that are expired or expiring within 1 hour!")
+        print(f"[!] Found {len(urgent_queue)} videos that are expired or expiring within 30 minutes!")
         
         # 3. Process ALL urgent items to renew them completely
         GLOBAL_SEEN_M3U8.clear()
@@ -362,6 +362,12 @@ def main():
                 existing_data["data"] = all_videos
                 update_links_in_github(existing_data)
                 updates_made_in_batch = 0
+            
+            # --- NEW ADDITION: 1 MINUTE REST AFTER EVERY 10 LINKS ---
+            # Har 10 links process hone ke baad 1 minute ka aaram karega
+            if priority_num % 10 == 0 and priority_num < len(urgent_queue):
+                print("\n[ZzZ] 10 links process ho gaye hain. 1 minute (60 seconds) ka rest le rahe hain...")
+                time.sleep(60)
 
         # 4. Upload any remaining updated data to GitHub
         if updates_made_in_batch > 0:
