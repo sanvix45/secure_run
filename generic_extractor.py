@@ -251,7 +251,7 @@ def main():
         existing_data = read_current_data_from_github()
         if not existing_data or "data" not in existing_data:
             print("[-] No data found on GitHub. Waiting 1 minute...")
-            time.sleep(60)
+            time.sleep(5)
             continue
 
         all_videos = existing_data["data"]
