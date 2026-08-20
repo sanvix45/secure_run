@@ -16,7 +16,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 
 # ==================== LOG CAPTURE SYSTEM ====================
-# Yeh memory mein last 500 print lines save karega (taaki RAM full na ho)
+# Memory buffer saving last 500 log lines
 log_buffer = collections.deque(maxlen=500)
 
 class OutputCapturer:
@@ -24,14 +24,12 @@ class OutputCapturer:
         self.original_stream = original_stream
 
     def write(self, text):
-        # MUTE Render logs: Do not write to original_stream, ONLY to buffer
-        # self.original_stream.write(text) 
         log_buffer.append(text)
 
     def flush(self):
         self.original_stream.flush()
 
-# Redirect standard output and errors to our custom capturer
+# Redirect standard output and errors to custom capturer
 sys.stdout = OutputCapturer(sys.stdout)
 sys.stderr = OutputCapturer(sys.stderr)
 # ==============================================================
@@ -57,7 +55,6 @@ GLOBAL_SEEN_M3U8 = set()
 
 class DummyHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        # URL se parameter check karna (?logs=logs)
         parsed_url = urlparse(self.path)
         query_params = parse_qs(parsed_url.query)
 
@@ -65,18 +62,14 @@ class DummyHandler(BaseHTTPRequestHandler):
         self.send_header('Content-type', 'text/html; charset=utf-8')
         self.end_headers()
 
-        # Agar URL mein ?logs=logs hai, to live logs show karo
         if query_params.get('logs') == ['logs']:
             logs_text = "".join(log_buffer)
-            # Hacker jaisa dark mode terminal UI
             html = f"<html><body style='background:#121212;color:#00FF00;font-family:monospace;padding:20px;'><pre>{logs_text}</pre></body></html>"
             self.wfile.write(html.encode('utf-8'))
         else:
-            # Normal URL par sirf simple text show karo
             self.wfile.write(b"Renewer Service is Running")
             
     def log_message(self, format, *args):
-        # Yeh HTTP server ke apne faltu logs ko print hone se rokega, taaki aapke main logs clean rahein
         pass
 
 def run_dummy_server():
@@ -132,16 +125,15 @@ def create_driver():
     """Initializes Chrome webdriver with extreme low-memory configuration for Render."""
     options = Options()
     
-    # Eager load strategy skips waiting for heavy CSS/Assets to load
     options.page_load_strategy = 'eager'
     
     # --- RENDER / SERVER HEADLESS OPTIONS ---
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage") # CRITICAL for 500MB limits
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("--mute-audio") # Save processing power
+    options.add_argument("--mute-audio")
     
     # --- EXTREME MEMORY SAVING FLAGS ---
     options.add_argument("--disable-extensions")
@@ -149,7 +141,6 @@ def create_driver():
     options.add_argument("--disable-site-isolation-trials")
     options.add_argument("--js-flags=--max-old-space-size=128")
     
-    # Block downloading of images, CSS, and fonts to save massive amounts of RAM
     prefs = {
         "profile.managed_default_content_settings.images": 2,
         "profile.managed_default_content_settings.stylesheet": 2,
@@ -220,25 +211,39 @@ def get_all_m3u8(driver):
     return list(set(urls))
 
 def extract_expiry_timestamp(url):
-    """Finds the 10-digit UNIX timestamp in the URL (e.g., ,1786914000/)."""
+    """Finds the 10-digit UNIX timestamp in the URL (e.g., ,1786914000/ or exp=1786914000)."""
+    if not url:
+        return 0
+        
+    # Standard xHamster path pattern: ,1786914000/
     match = re.search(r',(\d{10})/', url)
     if match:
         return int(match.group(1))
-    return 0 # 0 means could not parse, assume it needs immediate update
+        
+    # Query parameters pattern: exp=1786914000, expires=1786914000, t=1786914000
+    match = re.search(r'[?&_,-](?:exp|expires|expiry|valid|token|t)?=?([1-9]\d{9})(?:[\/,=_&?-]|$)', url, re.IGNORECASE)
+    if match:
+        return int(match.group(1))
+        
+    # Generic UNIX timestamp fallback (10 digits starting with 16, 17, 18, 19)
+    match = re.search(r'(?:^|[^0-9])(1[6-9]\d{8})(?:[^0-9]|$)', url)
+    if match:
+        return int(match.group(1))
+        
+    return 0 # 0 means invalid or missing timestamp
 
 def main():
     print("=" * 70)
     print("  Smart M3U8 Renewer - Priority Expiry Checker (Render Optimized)")
     print("=" * 70)
 
-    # Start the dummy web server in a background thread so Render marks deployment as successful
     server_thread = threading.Thread(target=run_dummy_server, daemon=True)
     server_thread.start()
 
     wait_sec = 10
     
     while True:
-        gc.collect() # Clean up memory at the start of loop
+        gc.collect()
         
         print("\n" + "=" * 50)
         print(f"Checking for expiring links at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -251,10 +256,11 @@ def main():
 
         all_videos = existing_data["data"]
         current_time = int(time.time())
-        thirty_min_limit = current_time + 1800 # 30 minutes from now (Changed from 1 hour)
-        
-        # 1. Identify videos that need renewal
-        urgent_queue = []
+        thirty_min_limit = current_time + 1800 # 30 minutes window
+
+        expired_queue = []       # Stage 1: Already expired / invalid / missing links
+        expiring_soon_queue = [] # Stage 2: Valid now, but expiring in 0-30 minutes
+
         for idx, item in enumerate(all_videos):
             m3u8_links = item.get("m3u8_links", [])
             earliest_expiry = float('inf')
@@ -267,26 +273,42 @@ def main():
                     if exp < earliest_expiry:
                         earliest_expiry = exp
             
-            # If the earliest expiry is within 30 minutes, or it's 0 (invalid/missing)
-            if earliest_expiry <= thirty_min_limit:
-                urgent_queue.append({
+            if earliest_expiry == float('inf'):
+                earliest_expiry = 0
+
+            # Priority Categorization Logic
+            if earliest_expiry <= current_time:
+                # Expired or Invalid link
+                expired_queue.append({
+                    "array_index": idx,
+                    "expiry": earliest_expiry,
+                    "item_data": item
+                })
+            elif earliest_expiry <= thirty_min_limit:
+                # Expiring in 0 - 30 minutes
+                expiring_soon_queue.append({
                     "array_index": idx,
                     "expiry": earliest_expiry,
                     "item_data": item
                 })
 
-        # 2. Sort the queue so the lowest expiry (most urgent/expired) is processed FIRST
-        urgent_queue.sort(key=lambda x: x["expiry"])
+        # Sort both queues by lowest expiry time
+        expired_queue.sort(key=lambda x: x["expiry"])
+        expiring_soon_queue.sort(key=lambda x: x["expiry"])
 
-        if not urgent_queue:
+        # Decide which queue to process
+        if expired_queue:
+            print(f"[!] FOUND EXPIRED LINKS: {len(expired_queue)} videos have EXPIRED or INVALID links. Processing EXPIRED queue first!")
+            urgent_queue = expired_queue
+        elif expiring_soon_queue:
+            print(f"[!] NO EXPIRED LINKS: Found {len(expiring_soon_queue)} videos expiring within 0-30 minutes. Processing 0-30m queue!")
+            urgent_queue = expiring_soon_queue
+        else:
             print("[+] All links are healthy and have > 30 mins of lifetime left.")
             print("[ZzZ] Sleeping for 20 minutes before checking again...")
             time.sleep(1200)
             continue
 
-        print(f"[!] Found {len(urgent_queue)} videos that are expired or expiring within 30 minutes!")
-        
-        # 3. Process ALL urgent items to renew them completely
         GLOBAL_SEEN_M3U8.clear()
         updates_made_in_batch = 0
         total_renewed = 0
@@ -302,19 +324,17 @@ def main():
 
             time_left_mins = (expiry - current_time) // 60
             if expiry == 0:
-                time_status = "NO VALID LINK"
+                time_status = "NO VALID LINK / UNKNOWN"
             elif time_left_mins < 0:
                 time_status = f"EXPIRED {abs(time_left_mins)} mins ago"
             else:
                 time_status = f"Expires in {time_left_mins} mins"
 
-            print(f"\n[{priority_num}/{len(urgent_queue)}] Urgent: {time_status}")
+            print(f"\n[{priority_num}/{len(urgent_queue)}] Priority Target: {time_status}")
             print(f"Opening: {vurl}")
             
             driver = None
             try:
-                # --- EXTREME RAM PROTECTION ---
-                # Open browser brand new for EVERY single video
                 driver = create_driver()
                 
                 driver.get(vurl)
@@ -333,7 +353,6 @@ def main():
                 
                 if round_found:
                     print(f"    [+] RENEWED! Got {len(round_found)} fresh m3u8 URL(s).")
-                    # Replace the old m3u8 array with the newly fetched ones
                     all_videos[idx]["m3u8_links"] = round_found
                     updates_made_in_batch += 1
                     total_renewed += 1
@@ -344,33 +363,25 @@ def main():
                 print(f"    [-] Error processing page: {e}")
                 
             finally:
-                # --- CRITICAL MEMORY STEP ---
-                # Kill Chrome completely after EVERY single video
                 if driver:
-                    try:
-                        driver.quit()
-                    except:
-                        pass
-                
-                # Strict RAM wipe
+                    try: driver.quit()
+                    except: pass
                 gc.collect()
 
-            # --- 10 LINKS CHECKPOINT: Upload to GitHub & 1 Minute Rest ---
             if priority_num % 10 == 0:
                 if updates_made_in_batch > 0:
-                    print(f"\n[+] 10 links process ho gaye hain! GitHub (.json) par update kar rahe hain ({updates_made_in_batch} fresh renewals)...")
+                    print(f"\n[+] 10 links processed! Direct GitHub update triggered ({updates_made_in_batch} renewed in this batch)...")
                     existing_data["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     existing_data["data"] = all_videos
                     update_links_in_github(existing_data)
                     updates_made_in_batch = 0
                 else:
-                    print("\n[!] 10 links process ho gaye hain (koi new renewals nahi hue).")
+                    print("\n[!] 10 links processed (no new renewals captured in this batch).")
 
                 if priority_num < len(urgent_queue):
-                    print("[ZzZ] 1 minute (60 seconds) ka rest le rahe hain...")
+                    print("[ZzZ] Resting for 1 minute (60 seconds) before processing next 10 links...")
                     time.sleep(60)
 
-        # 4. Upload any remaining updated data to GitHub
         if updates_made_in_batch > 0:
             print(f"\n[+] Finalizing upload... Saving remaining {updates_made_in_batch} renewals to GitHub.")
             existing_data["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -379,9 +390,8 @@ def main():
         elif total_renewed == 0:
             print("\n[-] No successful renewals in this cycle.")
 
-        # 5. Rest for 20 minutes after completing the full renewal cycle
         print(f"\n[!] Renewal cycle complete. Total URLs renewed: {total_renewed}")
-        print("[ZzZ] Resting for 20 minutes (1200 seconds) before the next check...")
+        print("[ZzZ] Resting for 20 minutes (1200 seconds) before next check...")
         time.sleep(1200)
 
 if __name__ == "__main__":
