@@ -4,42 +4,75 @@ import sys
 import re
 import datetime
 import os
-import gc  # Added for strict memory management
-import threading # Added for dummy server
-import collections # Added for log memory buffer
-from urllib.parse import urlparse, parse_qs # Added to check ?logs=logs
-from http.server import BaseHTTPRequestHandler, HTTPServer # Added for dummy server
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-import pymongo
-from pymongo import MongoClient
+import gc  
+import threading 
+import collections 
+import traceback
+from urllib.parse import urlparse, parse_qs 
+from http.server import BaseHTTPRequestHandler, HTTPServer 
+
+# ==================== CRASH CATCHER ====================
+def global_crash_handler(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    error_msg = "".join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    print(f"\n[CRITICAL BOT CRASH]\n{error_msg}")
+    sys.__stdout__.flush()
+    sys.__stderr__.flush()
+
+sys.excepthook = global_crash_handler
+# =======================================================
+
+print("Starting script execution... (Logging fixed for Render)")
+
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from webdriver_manager.chrome import ChromeDriverManager
+    print("Selenium imported successfully.")
+except ImportError as e:
+    print(f"Error importing selenium: {e}")
+    sys.exit(1)
+
+try:
+    import pymongo
+    from pymongo import MongoClient
+    print("pymongo imported successfully.")
+except ImportError as e:
+    print(f"Error importing pymongo: {e}")
+    sys.exit(1)
 
 # ==================== LOG CAPTURE SYSTEM ====================
-# Memory buffer saving last 500 log lines
 log_buffer = collections.deque(maxlen=500)
 
 class OutputCapturer:
-    def __init__(self, original_stream):
-        self.original_stream = original_stream
-
     def write(self, text):
         log_buffer.append(text)
+        # FORCE logs to Render Terminal so we can see why it crashes
+        try:
+            sys.__stdout__.write(text)
+            sys.__stdout__.flush()
+        except:
+            pass
 
     def flush(self):
-        self.original_stream.flush()
+        try:
+            sys.__stdout__.flush()
+        except:
+            pass
 
-# Redirect standard output and errors to custom capturer
-sys.stdout = OutputCapturer(sys.stdout)
-sys.stderr = OutputCapturer(sys.stderr)
+sys.stdout = OutputCapturer()
+sys.stderr = OutputCapturer()
 # ==============================================================
 
-# ==================== MONGODB CONFIGURATION ====================
-# Using the credentials you provided. 
-# Best practice is to use os.getenv("MONGO_URI") in production, but hardcoded here as requested.
+print("Environment setup complete. Checking MongoDB connection...")
+
 MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://santosh93348218_db_user:tvRiOqTjx2xYZn8J@secure.uetzpg8.mongodb.net/?retryWrites=true&w=majority&appName=secure")
-DB_NAME = "scraper_db"       # Change this to your actual database name if different
-COLLECTION_NAME = "videos"   # Change this to your actual collection name if different
+DB_NAME = "scraper_db"       
+COLLECTION_NAME = "videos"   
 
 try:
     print("[*] Connecting to MongoDB...")
@@ -50,8 +83,8 @@ try:
     print("[+] MongoDB connected successfully!")
 except Exception as e:
     print(f"[-] MongoDB connection failed: {e}")
+    print("CHECK YOUR MONGODB ATLAS NETWORK ACCESS! Set IP Access List to 0.0.0.0/0")
     sys.exit(1)
-# ==============================================================
 
 GLOBAL_SEEN_M3U8 = set()
 
@@ -76,25 +109,22 @@ class DummyHandler(BaseHTTPRequestHandler):
 
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), DummyHandler)
-    print(f"[*] Started dummy web server on port {port} to satisfy Render.")
-    server.serve_forever()
+    try:
+        server = HTTPServer(('0.0.0.0', port), DummyHandler)
+        print(f"[*] Started dummy web server on port {port} to satisfy Render.")
+        server.serve_forever()
+    except Exception as e:
+         print(f"[-] Dummy server failed to start: {e}")
 
 def create_driver():
-    """Initializes Chrome webdriver with extreme low-memory configuration for Render."""
     options = Options()
-    
     options.page_load_strategy = 'eager'
-    
-    # --- RENDER / SERVER HEADLESS OPTIONS ---
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--mute-audio")
-    
-    # --- EXTREME MEMORY SAVING FLAGS ---
     options.add_argument("--disable-extensions")
     options.add_argument("--no-zygote")
     options.add_argument("--disable-site-isolation-trials")
@@ -107,14 +137,19 @@ def create_driver():
         "profile.managed_default_content_settings.popups": 2
     }
     options.add_experimental_option("prefs", prefs)
-
     options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
 
-    driver = webdriver.Chrome(options=options)
+    try:
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+    except Exception as e:
+        print(f"Error creating driver with webdriver-manager: {e}")
+        driver = webdriver.Chrome(options=options)
+        
     driver.execute_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
     try: driver.execute_cdp_cmd("Network.enable", {})
     except: pass
@@ -170,22 +205,13 @@ def get_all_m3u8(driver):
     return list(set(urls))
 
 def extract_expiry_timestamp(url):
-    """Finds the 10-digit UNIX timestamp in the URL (e.g., ,1786914000/ or exp=1786914000)."""
-    if not url:
-        return 0
-        
+    if not url: return 0
     match = re.search(r',(\d{10})/', url)
-    if match:
-        return int(match.group(1))
-        
+    if match: return int(match.group(1))
     match = re.search(r'[?&_,-](?:exp|expires|expiry|valid|token|t)?=?([1-9]\d{9})(?:[\/,=_&?-]|$)', url, re.IGNORECASE)
-    if match:
-        return int(match.group(1))
-        
+    if match: return int(match.group(1))
     match = re.search(r'(?:^|[^0-9])(1[6-9]\d{8})(?:[^0-9]|$)', url)
-    if match:
-        return int(match.group(1))
-        
+    if match: return int(match.group(1))
     return 0 
 
 def main():
@@ -200,11 +226,9 @@ def main():
     
     while True:
         gc.collect()
-        
         print("\n" + "=" * 50)
         print(f"Checking for expiring links at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
-        # 1. Fetch data directly from MongoDB Collection
         try:
             all_videos = list(collection.find({}))
         except Exception as e:
@@ -218,19 +242,17 @@ def main():
             continue
 
         current_time = int(time.time())
-        thirty_min_limit = current_time + 1800 # 30 minutes window
+        thirty_min_limit = current_time + 1800 
 
-        expired_queue = []       # Stage 1: Already expired / invalid / missing links
-        expiring_soon_queue = [] # Stage 2: Valid now, but expiring in 0-30 minutes
+        expired_queue = []       
+        expiring_soon_queue = [] 
 
         for idx, item in enumerate(all_videos):
-            # CLEANUP: Remove ads domains from existing data before checking
             raw_m3u8_links = item.get("m3u8_links", [])
             m3u8_links = [link for link in raw_m3u8_links if "svacdn.tsyndicate.com" not in link]
-            item["m3u8_links"] = m3u8_links # Update item to permanently remove ads
+            item["m3u8_links"] = m3u8_links 
             
             earliest_expiry = float('inf')
-            
             if not m3u8_links:
                 earliest_expiry = 0
             else:
@@ -242,17 +264,14 @@ def main():
             if earliest_expiry == float('inf'):
                 earliest_expiry = 0
 
-            # Priority Categorization Logic
             if earliest_expiry <= current_time:
                 expired_queue.append({"expiry": earliest_expiry, "item_data": item})
             elif earliest_expiry <= thirty_min_limit:
                 expiring_soon_queue.append({"expiry": earliest_expiry, "item_data": item})
 
-        # Sort both queues by lowest expiry time
         expired_queue.sort(key=lambda x: x["expiry"])
         expiring_soon_queue.sort(key=lambda x: x["expiry"])
 
-        # Decide which queue to process
         if expired_queue:
             print(f"[!] FOUND EXPIRED LINKS: {len(expired_queue)} videos have EXPIRED or INVALID links. Processing EXPIRED queue first!")
             urgent_queue = expired_queue
@@ -272,7 +291,7 @@ def main():
             video = urgent_item["item_data"]
             expiry = urgent_item["expiry"]
             vurl = video.get("source_page")
-            doc_id = video.get("_id") # MongoDB document ID
+            doc_id = video.get("_id") 
             
             if not vurl or not doc_id:
                 continue
@@ -291,7 +310,6 @@ def main():
             driver = None
             try:
                 driver = create_driver()
-                
                 driver.get(vurl)
                 time.sleep(2)
                 clear_js(driver)
@@ -301,8 +319,7 @@ def main():
                 round_found = []
                 while time.time() < end_t:
                     for u in get_all_m3u8(driver):
-                        if "svacdn.tsyndicate.com" in u:
-                            continue # Ignore fast-expiring ad links
+                        if "svacdn.tsyndicate.com" in u: continue
                         if u not in GLOBAL_SEEN_M3U8:
                             GLOBAL_SEEN_M3U8.add(u)
                             round_found.append(u)
@@ -310,8 +327,6 @@ def main():
                 
                 if round_found:
                     print(f"    [+] RENEWED! Got {len(round_found)} fresh m3u8 URL(s).")
-                    
-                    # 2. Update strictly this single document in MongoDB immediately
                     try:
                         collection.update_one(
                             {"_id": doc_id}, 
@@ -324,7 +339,6 @@ def main():
                         total_renewed += 1
                     except Exception as db_err:
                         print(f"    [-] DB Update Failed: {db_err}")
-
                 else:
                     print("    [-] Failed to renew link (no stream captured).")
 
@@ -337,8 +351,7 @@ def main():
                     except: pass
                 gc.collect()
 
-            # Optional pause every 2 items to prevent overload
-            if priority_num % 10 == 0 and priority_num < len(urgent_queue):
+            if priority_num % 2 == 0 and priority_num < len(urgent_queue):
                 print("[ZzZ] Resting for 1 minute (60 seconds) before processing next batch...")
                 time.sleep(60)
 
