@@ -1,6 +1,5 @@
 FROM python:3.10-slim
 
-# Install dependencies, add Google Chrome repository securely, and install Chrome
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         wget \
@@ -20,9 +19,10 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Run the updated Python script
 CMD ["python", "-u", "generic_extractor.py"]
