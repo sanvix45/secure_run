@@ -25,4 +25,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Run the updated Python script
-CMD ["python", "-u", "smart_m3u8_renewer.py"]
+CMD ["python", "-u", "generic_extractor.py"]
