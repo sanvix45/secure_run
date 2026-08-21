@@ -374,7 +374,7 @@ def main():
                     except: pass
                 gc.collect()
 
-            if priority_num % 10 == 0:
+            if priority_num % 2 == 0:
                 if updates_made_in_batch > 0:
                     print(f"\n[+] 10 links processed! Direct GitHub update triggered ({updates_made_in_batch} renewed in this batch)...")
                     existing_data["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
