@@ -1,11 +1,13 @@
 FROM python:3.10-slim
 
+# Install dependencies and Google Chrome
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         wget \
         gnupg \
         unzip \
         ca-certificates \
+        curl \
     && mkdir -p /etc/apt/keyrings \
     && wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub \
         | gpg --dearmor -o /etc/apt/keyrings/google-chrome.gpg \
@@ -19,10 +21,12 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+# Install webdriver-manager
+RUN pip install --no-cache-dir webdriver-manager
 
 COPY . .
+
 
 CMD ["python", "-u", "generic_extractor.py"]
