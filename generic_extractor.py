@@ -2,8 +2,6 @@ import json
 import time
 import sys
 import re
-import requests
-import base64
 import datetime
 import os
 import gc  # Added for strict memory management
@@ -14,6 +12,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer # Added for dummy ser
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
+import pymongo
+from pymongo import MongoClient
 
 # ==================== LOG CAPTURE SYSTEM ====================
 # Memory buffer saving last 500 log lines
@@ -34,21 +34,23 @@ sys.stdout = OutputCapturer(sys.stdout)
 sys.stderr = OutputCapturer(sys.stderr)
 # ==============================================================
 
-# ==================== GITHUB CONFIGURATION ====================
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-if not GITHUB_TOKEN:
-    print("[-] Error: GITHUB_TOKEN environment variable is not set. Please set it before running.")
-    sys.exit(1)
+# ==================== MONGODB CONFIGURATION ====================
+# Using the credentials you provided. 
+# Best practice is to use os.getenv("MONGO_URI") in production, but hardcoded here as requested.
+MONGO_URI = os.getenv("MONGO_URI", "mongodb+srv://santosh93348218_db_user:tvRiOqTjx2xYZn8J@secure.uetzpg8.mongodb.net/?retryWrites=true&w=majority&appName=secure")
+DB_NAME = "scraper_db"       # Change this to your actual database name if different
+COLLECTION_NAME = "videos"   # Change this to your actual collection name if different
 
-REPO_OWNER = "st3084907-jpg"
-REPO_NAME = "sdata"
-FILE_NAME = "source.json"
-API_URL = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FILE_NAME}"
-RAW_URL = f"https://raw.githubusercontent.com/{REPO_OWNER}/{REPO_NAME}/main/{FILE_NAME}"
-HEADERS = {
-    "Authorization": f"token {GITHUB_TOKEN}",
-    "Accept": "application/vnd.github.v3+json"
-}
+try:
+    print("[*] Connecting to MongoDB...")
+    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    mongo_client.server_info() # Test connection
+    db = mongo_client[DB_NAME]
+    collection = db[COLLECTION_NAME]
+    print("[+] MongoDB connected successfully!")
+except Exception as e:
+    print(f"[-] MongoDB connection failed: {e}")
+    sys.exit(1)
 # ==============================================================
 
 GLOBAL_SEEN_M3U8 = set()
@@ -77,49 +79,6 @@ def run_dummy_server():
     server = HTTPServer(('0.0.0.0', port), DummyHandler)
     print(f"[*] Started dummy web server on port {port} to satisfy Render.")
     server.serve_forever()
-
-def read_current_data_from_github():
-    """Reads the existing source.json from GitHub."""
-    try:
-        response = requests.get(RAW_URL)
-        if response.status_code == 200:
-            try:
-                return response.json()
-            except requests.exceptions.JSONDecodeError:
-                print("[-] Error: GitHub file exists but is not valid JSON.")
-                return None
-        else:
-            print(f"[-] Could not find or read {FILE_NAME} on GitHub.")
-            return None
-    except Exception as e:
-        print(f"[-] Error reading from GitHub: {e}")
-        return None
-
-def update_links_in_github(new_data_dict):
-    """Updates the target JSON file in the GitHub repository."""
-    response = requests.get(API_URL, headers=HEADERS)
-    sha = None
-    if response.status_code == 200:
-        sha = response.json()['sha']
-
-    json_string = json.dumps(new_data_dict, indent=4)
-    encoded_bytes = base64.b64encode(json_string.encode('utf-8'))
-    encoded_content = encoded_bytes.decode('utf-8')
-
-    payload = {
-        "message": "Auto-Renewed expiring m3u8 links via Smart Python Scraper",
-        "content": encoded_content
-    }
-    if sha:
-        payload["sha"] = sha
-
-    update_response = requests.put(API_URL, headers=HEADERS, json=payload)
-    if update_response.status_code in [200, 201]:
-        print("[+] Successfully Updated! Urgent links saved to GitHub.")
-        return True
-    else:
-        print(f"[-] Update failed: {update_response.status_code}")
-        return False
 
 def create_driver():
     """Initializes Chrome webdriver with extreme low-memory configuration for Render."""
@@ -215,26 +174,23 @@ def extract_expiry_timestamp(url):
     if not url:
         return 0
         
-    # Standard xHamster path pattern: ,1786914000/
     match = re.search(r',(\d{10})/', url)
     if match:
         return int(match.group(1))
         
-    # Query parameters pattern: exp=1786914000, expires=1786914000, t=1786914000
     match = re.search(r'[?&_,-](?:exp|expires|expiry|valid|token|t)?=?([1-9]\d{9})(?:[\/,=_&?-]|$)', url, re.IGNORECASE)
     if match:
         return int(match.group(1))
         
-    # Generic UNIX timestamp fallback (10 digits starting with 16, 17, 18, 19)
     match = re.search(r'(?:^|[^0-9])(1[6-9]\d{8})(?:[^0-9]|$)', url)
     if match:
         return int(match.group(1))
         
-    return 0 # 0 means invalid or missing timestamp
+    return 0 
 
 def main():
     print("=" * 70)
-    print("  Smart M3U8 Renewer - Priority Expiry Checker (Render Optimized)")
+    print("  Smart M3U8 Renewer - Priority Expiry Checker (MongoDB + Render)")
     print("=" * 70)
 
     server_thread = threading.Thread(target=run_dummy_server, daemon=True)
@@ -248,13 +204,19 @@ def main():
         print("\n" + "=" * 50)
         print(f"Checking for expiring links at: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         
-        existing_data = read_current_data_from_github()
-        if not existing_data or "data" not in existing_data:
-            print("[-] No data found on GitHub. Waiting 1 minute...")
-            time.sleep(5)
+        # 1. Fetch data directly from MongoDB Collection
+        try:
+            all_videos = list(collection.find({}))
+        except Exception as e:
+            print(f"[-] Failed to read from MongoDB: {e}")
+            time.sleep(60)
             continue
 
-        all_videos = existing_data["data"]
+        if not all_videos:
+            print("[-] No data found in MongoDB collection. Waiting 1 minute...")
+            time.sleep(60)
+            continue
+
         current_time = int(time.time())
         thirty_min_limit = current_time + 1800 # 30 minutes window
 
@@ -282,19 +244,9 @@ def main():
 
             # Priority Categorization Logic
             if earliest_expiry <= current_time:
-                # Expired or Invalid link
-                expired_queue.append({
-                    "array_index": idx,
-                    "expiry": earliest_expiry,
-                    "item_data": item
-                })
+                expired_queue.append({"expiry": earliest_expiry, "item_data": item})
             elif earliest_expiry <= thirty_min_limit:
-                # Expiring in 0 - 30 minutes
-                expiring_soon_queue.append({
-                    "array_index": idx,
-                    "expiry": earliest_expiry,
-                    "item_data": item
-                })
+                expiring_soon_queue.append({"expiry": earliest_expiry, "item_data": item})
 
         # Sort both queues by lowest expiry time
         expired_queue.sort(key=lambda x: x["expiry"])
@@ -314,16 +266,15 @@ def main():
             continue
 
         GLOBAL_SEEN_M3U8.clear()
-        updates_made_in_batch = 0
         total_renewed = 0
 
         for priority_num, urgent_item in enumerate(urgent_queue, 1):
-            idx = urgent_item["array_index"]
             video = urgent_item["item_data"]
             expiry = urgent_item["expiry"]
             vurl = video.get("source_page")
+            doc_id = video.get("_id") # MongoDB document ID
             
-            if not vurl:
+            if not vurl or not doc_id:
                 continue
 
             time_left_mins = (expiry - current_time) // 60
@@ -359,9 +310,21 @@ def main():
                 
                 if round_found:
                     print(f"    [+] RENEWED! Got {len(round_found)} fresh m3u8 URL(s).")
-                    all_videos[idx]["m3u8_links"] = round_found
-                    updates_made_in_batch += 1
-                    total_renewed += 1
+                    
+                    # 2. Update strictly this single document in MongoDB immediately
+                    try:
+                        collection.update_one(
+                            {"_id": doc_id}, 
+                            {"$set": {
+                                "m3u8_links": round_found,
+                                "last_updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }}
+                        )
+                        print("    [+] DB Updated successfully.")
+                        total_renewed += 1
+                    except Exception as db_err:
+                        print(f"    [-] DB Update Failed: {db_err}")
+
                 else:
                     print("    [-] Failed to renew link (no stream captured).")
 
@@ -374,29 +337,15 @@ def main():
                     except: pass
                 gc.collect()
 
-            if priority_num % 2 == 0:
-                if updates_made_in_batch > 0:
-                    print(f"\n[+] 10 links processed! Direct GitHub update triggered ({updates_made_in_batch} renewed in this batch)...")
-                    existing_data["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    existing_data["data"] = all_videos
-                    update_links_in_github(existing_data)
-                    updates_made_in_batch = 0
-                else:
-                    print("\n[!] 10 links processed (no new renewals captured in this batch).")
+            # Optional pause every 2 items to prevent overload
+            if priority_num % 2 == 0 and priority_num < len(urgent_queue):
+                print("[ZzZ] Resting for 1 minute (60 seconds) before processing next batch...")
+                time.sleep(60)
 
-                if priority_num < len(urgent_queue):
-                    print("[ZzZ] Resting for 1 minute (60 seconds) before processing next 10 links...")
-                    time.sleep(60)
-
-        if updates_made_in_batch > 0:
-            print(f"\n[+] Finalizing upload... Saving remaining {updates_made_in_batch} renewals to GitHub.")
-            existing_data["last_updated"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            existing_data["data"] = all_videos
-            update_links_in_github(existing_data)
-        elif total_renewed == 0:
+        if total_renewed == 0:
             print("\n[-] No successful renewals in this cycle.")
 
-        print(f"\n[!] Renewal cycle complete. Total URLs renewed: {total_renewed}")
+        print(f"\n[!] Renewal cycle complete. Total URLs renewed and updated in DB: {total_renewed}")
         print("[ZzZ] Resting for 20 minutes (1200 seconds) before next check...")
         time.sleep(1200)
 
