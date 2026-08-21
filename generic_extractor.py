@@ -338,7 +338,7 @@ def main():
                 gc.collect()
 
             # Optional pause every 2 items to prevent overload
-            if priority_num % 2 == 0 and priority_num < len(urgent_queue):
+            if priority_num % 10 == 0 and priority_num < len(urgent_queue):
                 print("[ZzZ] Resting for 1 minute (60 seconds) before processing next batch...")
                 time.sleep(60)
 
