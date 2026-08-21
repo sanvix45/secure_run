@@ -75,8 +75,13 @@ DB_NAME = "scraper_db"
 COLLECTION_NAME = "videos"   
 
 try:
-    print("[*] Connecting to MongoDB...")
-    mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+    print("[*] Connecting to MongoDB with TLS SSL configuration...")
+    mongo_client = MongoClient(
+        MONGO_URI, 
+        serverSelectionTimeoutMS=10000,
+        tls=True,
+        tlsAllowInvalidCertificates=True
+    )
     mongo_client.server_info() # Test connection
     db = mongo_client[DB_NAME]
     collection = db[COLLECTION_NAME]
